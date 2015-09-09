@@ -138,7 +138,7 @@ func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
 			lc.length = lc.length + 1
 		}
 
-		atomic.StoreUint32(&lc.isLocked, falseUint)
+		lc.isLocked = falseUint
 	}
 
 	return access, capacity
@@ -158,7 +158,7 @@ func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
 			lc.length = lc.length - 1
 		}
 
-		atomic.StoreUint32(&lc.isLocked, falseUint)
+		lc.isLocked = falseUint
 	}
 
 	return item, access, capacity

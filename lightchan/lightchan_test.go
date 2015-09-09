@@ -160,7 +160,7 @@ func TestFIFOOrderReceiveInterleaved(t *testing.T) {
 // Ensure thread safety in the case of M producers and N consumers
 func TestMProducersNConsumers(t *testing.T) {
 	// Number of elements to produce and consume in each configuration
-	size := 10000
+	size := 1000
 
 	// Try different numbers of producers and consumers
 	for m := 1; m < 10; m++ {
@@ -262,5 +262,21 @@ func assertBlocks(t *testing.T, f func(), duration time.Duration) {
 		t.Fail()
 	case <-time.After(duration):
 		// Expected
+	}
+}
+
+func BenchmarkGoChanSerial(b *testing.B) {
+	theChan := make(chan int, 1)
+	for n := 0; n < b.N; n++ {
+		theChan <- 42
+		<-theChan
+	}
+}
+
+func BenchmarkLightChanSerial(b *testing.B) {
+	theChan := New(0, 1)
+	for n := 0; n < b.N; n++ {
+		theChan.Send(42)
+		theChan.Receive()
 	}
 }

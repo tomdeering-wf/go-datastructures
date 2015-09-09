@@ -160,17 +160,20 @@ func TestFIFOOrderReceiveInterleaved(t *testing.T) {
 // Ensure thread safety in the case of M producers and N consumers
 func TestMProducersNConsumers(t *testing.T) {
 	// Number of elements to produce and consume in each configuration
-	size := 2
+	size := 10000
 
 	// Try different numbers of producers and consumers
-	for m := 1; m < 2; m++ {
-		for n := 1; n < 2; n++ {
+	for m := 1; m < 10; m++ {
+		for n := 1; n < 10; n++ {
+			// The LightChan used by the producers and consumers
 			lc := New(0, size)
-			// Load up a source with values to send
+
+			// Source of the values that will be produced
 			source := make(chan int, size)
 			for i := 0; i < size; i++ {
 				source <- i
 			}
+
 			// Destination for consumed values
 			sink := make(chan int, size)
 
@@ -184,7 +187,7 @@ func TestMProducersNConsumers(t *testing.T) {
 				go produce(lc, source)
 			}
 
-			// Record values that are produced and consumed, coming out through the sink
+			// Record consumed values, looking for duplicates or not enough values consumed
 			received := make([]bool, size)
 			for i := 0; i < size; i++ {
 				select {
@@ -199,7 +202,7 @@ func TestMProducersNConsumers(t *testing.T) {
 				}
 			}
 
-			// Assert that all expected values were produced and consumed
+			// Assert that all produced values were consumed
 			for _, b := range received {
 				// Check for missing value
 				assert.True(t, b)
@@ -211,7 +214,11 @@ func TestMProducersNConsumers(t *testing.T) {
 // Keep receiving values from the LightChan and storing them in the sink
 func consume(lc LightChan, sink chan<- int) {
 	sugarChan := make(chan int)
-	go func() { sugarChan <- lc.Receive().(int) }()
+	go func() {
+		for {
+			sugarChan <- lc.Receive().(int)
+		}
+	}()
 
 ReceiveLoop:
 	for {
@@ -224,7 +231,7 @@ ReceiveLoop:
 	}
 }
 
-// Keep sending values from the source to the LightChan until finished
+// Keep producing and sending values from the source to the LightChan until finished
 func produce(lc LightChan, source <-chan int) {
 SendLoop:
 	for {

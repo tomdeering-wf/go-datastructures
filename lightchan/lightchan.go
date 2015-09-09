@@ -134,7 +134,7 @@ func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
 		capacity = lc.length < lc.capacity
 		if capacity {
 			lc.items[lc.head] = item
-			lc.head = lc.head + 1
+			lc.head = (lc.head + 1) % lc.capacity
 			lc.length = lc.length + 1
 		}
 
@@ -154,7 +154,7 @@ func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
 		if capacity {
 			item = lc.items[lc.tail]
 			lc.items[lc.tail] = lc.zeroValue
-			lc.tail = lc.tail + 1
+			lc.tail = (lc.tail + 1) % lc.capacity
 			lc.length = lc.length - 1
 		}
 

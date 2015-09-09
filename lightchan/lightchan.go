@@ -81,7 +81,7 @@ func New(zeroValue interface{}, capacity int) LightChan {
 	return &lightChan{
 		capacity:  uint32(capacity),
 		length:    0,
-		isLocked:  FALSE,
+		isLocked:  falseUint,
 		items:     make([]interface{}, capacity),
 		head:      0,
 		tail:      0,
@@ -92,8 +92,8 @@ func New(zeroValue interface{}, capacity int) LightChan {
 const (
 	// How long to wait before re-checking the capacity
 	capacityPollingInterval = 20 * time.Nanosecond
-	TRUE                    = uint32(1)
-	FALSE                   = uint32(0)
+	trueUint                = uint32(1)
+	falseUint               = uint32(0)
 )
 
 var (
@@ -127,7 +127,7 @@ type lightChan struct {
 
 func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
 	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, FALSE, TRUE)
+	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
 
 	// We've got exclusive access!
 	if access {
@@ -138,7 +138,7 @@ func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
 			lc.length = lc.length + 1
 		}
 
-		atomic.StoreUint32(&lc.isLocked, FALSE)
+		atomic.StoreUint32(&lc.isLocked, falseUint)
 	}
 
 	return access, capacity
@@ -146,7 +146,7 @@ func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
 
 func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
 	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, FALSE, TRUE)
+	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
 
 	// We've got exclusive access!
 	if access {
@@ -158,7 +158,7 @@ func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
 			lc.length = lc.length - 1
 		}
 
-		atomic.StoreUint32(&lc.isLocked, FALSE)
+		atomic.StoreUint32(&lc.isLocked, falseUint)
 	}
 
 	return item, access, capacity

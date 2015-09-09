@@ -55,20 +55,6 @@ type LightChan interface {
 
 	// Returns the capacity of the channel buffer
 	Cap() int
-
-	// Try sending the given item on the channel, returning the result without blocking
-	// Sending may be unsuccessful if:
-	//    (1) Another thread is currently modifying the channel
-	//    (2) The channel lacks sufficient capacity (and hence a block would be necessary)
-	// The send succeeded IFF access && capacity
-	TrySend(item interface{}) (access, capacity bool)
-
-	// Try sending the given item on the channel, returning success status without blocking
-	// Receiving may be unsuccessful if:
-	//    (1) Another thread is currently modifying the channel
-	//    (2) No items are available to take (and hence a block would be necessary)
-	// The receive succeeded IFF access && capacity
-	TryReceive() (item interface{}, access, capacity bool)
 }
 
 // Constructs a new LightChan with the given capacity and zero-value.
@@ -79,19 +65,20 @@ func New(zeroValue interface{}, capacity int) LightChan {
 		panic(fmt.Sprintf("Expected LightChan capacity > 0 but requested was %d!", capacity))
 	}
 	return &lightChan{
-		capacity:  uint32(capacity),
-		length:    0,
-		isLocked:  falseUint,
-		items:     make([]interface{}, capacity),
-		head:      0,
-		tail:      0,
-		zeroValue: zeroValue,
+		capacity:        uint32(capacity),
+		length:          0,
+		items:           make([]interface{}, capacity),
+		head:            0,
+		tail:            0,
+		provisionalHead: 0,
+		provisionalTail: 0,
+		zeroValue:       zeroValue,
 	}
 }
 
 const (
 	// How long to wait before re-checking the capacity
-	capacityPollingInterval = 20 * time.Nanosecond
+	capacityPollingInterval = 1 * time.Nanosecond
 	trueUint                = uint32(1)
 	falseUint               = uint32(0)
 )
@@ -109,9 +96,6 @@ type lightChan struct {
 	// Number of elements N currently stored in the channel, 0 <= N <= capacity
 	length uint32
 
-	// Whether the channel can be accessed
-	isLocked uint32
-
 	// The actual elements
 	items []interface{}
 
@@ -121,107 +105,44 @@ type lightChan struct {
 	// The index where the next item should be stored
 	tail uint32
 
+	provisionalHead uint32
+
+	provisionalTail uint32
+
 	// The zeroed value of the type being stored
 	zeroValue interface{}
 }
 
-func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
-	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
-
-	// We've got exclusive access!
-	if access {
-		capacity = lc.length < lc.capacity
-		if capacity {
-			lc.items[lc.head] = item
-			lc.head = (lc.head + 1) % lc.capacity
-			lc.length = lc.length + 1
-		}
-
-		lc.isLocked = falseUint
-	}
-
-	return access, capacity
-}
-
-func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
-	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
-
-	// We've got exclusive access!
-	if access {
-		capacity = lc.length > 0
-		if capacity {
-			item = lc.items[lc.tail]
-			lc.items[lc.tail] = lc.zeroValue
-			lc.tail = (lc.tail + 1) % lc.capacity
-			lc.length = lc.length - 1
-		}
-
-		lc.isLocked = falseUint
-	}
-
-	return item, access, capacity
-}
-
 func (lc *lightChan) Send(item interface{}) {
-	// Sleep time to resolve concurrent channel contention
-	accessSleep := time.Duration(0)
-
-	// Keep trying until success
-	for access, capacity := lc.TrySend(item); !access || !capacity; access, capacity = lc.TrySend(item) {
-		// No access because of contention
-		if !access {
-			// First time losing a race
-			if accessSleep == 0 {
-				// Generate a small random sleep 1ns <= S <= 10ns
-				accessSleep = time.Duration(rand.Intn(10) + 1)
-			} else {
-				// Each subsequent time we lose the race, double our sleep
-				accessSleep = accessSleep * 2
-			}
-			// Sleep, then try again
-			time.Sleep(accessSleep)
-		} else {
-			// Reset access sleep since we had no problem with access
-			accessSleep = 0
+	// Until success
+	for {
+		if lc.length == lc.capacity {
 			// Wait for more capacity to be available, then try again
 			time.Sleep(capacityPollingInterval)
+		} else if atomic.CompareAndSwapUint32(&lc.provisionalHead, lc.head, (lc.head+1)%lc.capacity) {
+			// We succeeded in moving the provisional head index, which means we're the exclusive next writer
+			lc.items[lc.provisionalHead] = item
+			atomic.AddUint32(&lc.length, 1)
+			lc.head = lc.provisionalHead
+			return
 		}
 	}
-
-	// Successl
 }
 
 func (lc *lightChan) Receive() interface{} {
-	// Sleep time to resolve concurrent channel contention
-	accessSleep := time.Duration(0)
-
-	var received interface{}
-	var access, capacity bool
-	// Keep trying until success
-	for received, access, capacity = lc.TryReceive(); !access || !capacity; received, access, capacity = lc.TryReceive() {
-		// No access because of contention
-		if !access {
-			// First time losing a race
-			if accessSleep == 0 {
-				// Generate a small random sleep 1ns <= S <= 10ns
-				accessSleep = time.Duration(rand.Intn(10) + 1)
-			} else {
-				// Each subsequent time we lose the race, double our sleep
-				accessSleep = accessSleep * 2
-			}
-			// Sleep, then try again
-			time.Sleep(accessSleep)
-		} else {
-			// Reset access sleep since we had no problem with access
-			accessSleep = 0
+	// Until success
+	for {
+		if lc.length == 0 {
 			// Wait for more capacity to be available, then try again
 			time.Sleep(capacityPollingInterval)
+		} else if atomic.CompareAndSwapUint32(&lc.provisionalTail, lc.tail, (lc.tail+1)%lc.capacity) {
+			// We succeeded in moving the provisional tail index, which means we're the exclusive next reader
+			item := lc.items[lc.provisionalTail]
+			atomic.AddUint32(&lc.length, ^uint32(0))
+			lc.tail = lc.provisionalTail
+			return item
 		}
 	}
-
-	return received // Success
 }
 
 func (lc *lightChan) Len() int {

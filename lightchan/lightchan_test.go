@@ -280,3 +280,62 @@ func BenchmarkLightChanSerial(b *testing.B) {
 		theChan.Receive()
 	}
 }
+
+func BenchmarkGoChanParallel(b *testing.B) {
+	theChan := make(chan int, 100000)
+
+	// Start consumers
+	consumed := make(chan int, 100000)
+	for n := 0; n < 100; n++ {
+		go func() {
+			for {
+				val := <-theChan
+				consumed <- val
+			}
+		}()
+	}
+
+	// Start producers
+	for m := 0; m < 100; m++ {
+		valToProduce := m
+		go func() {
+			for {
+				theChan <- valToProduce
+			}
+		}()
+	}
+
+	// Run benchmark
+	for i := 0; i < b.N; i++ {
+		<-consumed
+	}
+}
+
+func BenchmarkLightChanParallel(b *testing.B) {
+	theChan := New(0, 100000)
+
+	// Start consumers
+	consumed := make(chan int, 100000)
+	for n := 0; n < 100; n++ {
+		go func() {
+			for {
+				consumed <- theChan.Receive().(int)
+			}
+		}()
+	}
+
+	// Start producers
+	for m := 0; m < 100; m++ {
+		valToProduce := m
+		go func() {
+			for {
+				theChan.Send(valToProduce)
+			}
+		}()
+	}
+
+	// Run benchmark
+	for i := 0; i < b.N; i++ {
+		<-consumed
+	}
+}

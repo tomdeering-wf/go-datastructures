@@ -27,13 +27,13 @@ var smallItemSet = []int{-18, -20, 0, 3, 0, 6, 7, -100}
 
 // Ensure that zero capacity panics
 func TestZeroCapacityPanics(t *testing.T) {
-	defer expectPanic(t)
+	defer assertPanic(t)
 	New(nil, 0)
 }
 
 // Ensure that zero capacity panics
 func TestNegativeCapacityPanics(t *testing.T) {
-	defer expectPanic(t)
+	defer assertPanic(t)
 	New(nil, -1)
 }
 
@@ -157,8 +157,88 @@ func TestFIFOOrderReceiveInterleaved(t *testing.T) {
 	}
 }
 
+// Ensure thread safety in the case of M producers and N consumers
+func TestMProducersNConsumers(t *testing.T) {
+	// Number of elements to produce and consume in each configuration
+	size := 2
+
+	// Try different numbers of producers and consumers
+	for m := 1; m < 2; m++ {
+		for n := 1; n < 2; n++ {
+			lc := New(0, size)
+			// Load up a source with values to send
+			source := make(chan int, size)
+			for i := 0; i < size; i++ {
+				source <- i
+			}
+			// Destination for consumed values
+			sink := make(chan int, size)
+
+			// Start consumers
+			for i := 0; i < n; i++ {
+				go consume(lc, sink)
+			}
+
+			// Start producers
+			for i := 0; i < m; i++ {
+				go produce(lc, source)
+			}
+
+			// Record values that are produced and consumed, coming out through the sink
+			received := make([]bool, size)
+			for i := 0; i < size; i++ {
+				select {
+				case next := <-sink:
+					if !assert.False(t, received[next]) {
+						t.FailNow()
+					}
+					received[next] = true
+				case <-time.After(500 * time.Millisecond):
+					assert.Fail(t, "Expected more values")
+					t.FailNow()
+				}
+			}
+
+			// Assert that all expected values were produced and consumed
+			for _, b := range received {
+				// Check for missing value
+				assert.True(t, b)
+			}
+		}
+	}
+}
+
+// Keep receiving values from the LightChan and storing them in the sink
+func consume(lc LightChan, sink chan<- int) {
+	sugarChan := make(chan int)
+	go func() { sugarChan <- lc.Receive().(int) }()
+
+ReceiveLoop:
+	for {
+		select {
+		case i := <-sugarChan:
+			sink <- i
+		case <-time.After(100 * time.Millisecond):
+			break ReceiveLoop
+		}
+	}
+}
+
+// Keep sending values from the source to the LightChan until finished
+func produce(lc LightChan, source <-chan int) {
+SendLoop:
+	for {
+		select {
+		case i := <-source:
+			lc.Send(i)
+		case <-time.After(100 * time.Millisecond):
+			break SendLoop
+		}
+	}
+}
+
 // Expect a panic and recover
-func expectPanic(t *testing.T) {
+func assertPanic(t *testing.T) {
 	assert.NotNil(t, recover())
 }
 

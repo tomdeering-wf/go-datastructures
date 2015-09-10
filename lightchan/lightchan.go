@@ -41,6 +41,7 @@ import (
 	"math/rand"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 type LightChan interface {
@@ -55,20 +56,6 @@ type LightChan interface {
 
 	// Returns the capacity of the channel buffer
 	Cap() int
-
-	// Try sending the given item on the channel, returning the result without blocking
-	// Sending may be unsuccessful if:
-	//    (1) Another thread is currently modifying the channel
-	//    (2) The channel lacks sufficient capacity (and hence a block would be necessary)
-	// The send succeeded IFF access && capacity
-	TrySend(item interface{}) (access, capacity bool)
-
-	// Try sending the given item on the channel, returning success status without blocking
-	// Receiving may be unsuccessful if:
-	//    (1) Another thread is currently modifying the channel
-	//    (2) No items are available to take (and hence a block would be necessary)
-	// The receive succeeded IFF access && capacity
-	TryReceive() (item interface{}, access, capacity bool)
 }
 
 // Constructs a new LightChan with the given capacity and zero-value.
@@ -78,14 +65,12 @@ func New(zeroValue interface{}, capacity int) LightChan {
 	if capacity <= 0 {
 		panic(fmt.Sprintf("Expected LightChan capacity > 0 but requested was %d!", capacity))
 	}
+
+	emptySlice := make([]interface{}, 0)
 	return &lightChan{
-		capacity:  uint32(capacity),
-		length:    0,
-		isLocked:  falseUint,
-		items:     make([]interface{}, capacity),
-		head:      0,
-		tail:      0,
 		zeroValue: zeroValue,
+		capacity:  uint32(capacity),
+		bodyPtr:   unsafe.Pointer(&emptySlice),
 	}
 }
 
@@ -106,62 +91,11 @@ type lightChan struct {
 	// Capacity of the underlying storage
 	capacity uint32
 
-	// Number of elements N currently stored in the channel, 0 <= N <= capacity
-	length uint32
-
-	// Whether the channel can be accessed
-	isLocked uint32
-
-	// The actual elements
-	items []interface{}
-
-	// The index of the first available item
-	head uint32
-
-	// The index where the next item should be stored
-	tail uint32
-
 	// The zeroed value of the type being stored
 	zeroValue interface{}
-}
 
-func (lc *lightChan) TrySend(item interface{}) (access, capacity bool) {
-	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
-
-	// We've got exclusive access!
-	if access {
-		capacity = lc.length < lc.capacity
-		if capacity {
-			lc.items[lc.head] = item
-			lc.head = (lc.head + 1) % lc.capacity
-			lc.length = lc.length + 1
-		}
-
-		lc.isLocked = falseUint
-	}
-
-	return access, capacity
-}
-
-func (lc *lightChan) TryReceive() (item interface{}, access, capacity bool) {
-	// Try to acquire the "lock"
-	access = atomic.CompareAndSwapUint32(&lc.isLocked, falseUint, trueUint)
-
-	// We've got exclusive access!
-	if access {
-		capacity = lc.length > 0
-		if capacity {
-			item = lc.items[lc.tail]
-			lc.items[lc.tail] = lc.zeroValue
-			lc.tail = (lc.tail + 1) % lc.capacity
-			lc.length = lc.length - 1
-		}
-
-		lc.isLocked = falseUint
-	}
-
-	return item, access, capacity
+	// The mutable body of the channel, a pointer to []interface{}
+	bodyPtr unsafe.Pointer
 }
 
 func (lc *lightChan) Send(item interface{}) {
@@ -169,63 +103,79 @@ func (lc *lightChan) Send(item interface{}) {
 	accessSleep := time.Duration(0)
 
 	// Keep trying until success
-	for access, capacity := lc.TrySend(item); !access || !capacity; access, capacity = lc.TrySend(item) {
-		// No access because of contention
-		if !access {
-			// First time losing a race
-			if accessSleep == 0 {
-				// Generate a small random sleep 1ns <= S <= 10ns
-				accessSleep = time.Duration(rand.Intn(10) + 1)
-			} else {
-				// Each subsequent time we lose the race, double our sleep
-				accessSleep = accessSleep * 2
-			}
-			// Sleep, then try again
-			time.Sleep(accessSleep)
-		} else {
-			// Reset access sleep since we had no problem with access
-			accessSleep = 0
-			// Wait for more capacity to be available, then try again
-			time.Sleep(capacityPollingInterval)
-		}
-	}
+	for {
+		cur := (*[]interface{})(lc.bodyPtr)
 
-	// Successl
+		// No room, wait for capacity
+		if len(*cur) == int(lc.capacity) {
+			time.Sleep(capacityPollingInterval)
+			continue
+		}
+
+		// Speculative update
+		newLen := len(*cur) + 1
+		next := make([]interface{}, newLen)
+		copy(next, *cur)
+		next[newLen-1] = item
+
+		// Try to update
+		if atomic.CompareAndSwapPointer(&lc.bodyPtr, unsafe.Pointer(cur), unsafe.Pointer(&next)) {
+			// Success!
+			return
+		}
+
+		if accessSleep == 0 {
+			// Generate a small random sleep  s, 1ns <= s <= 10ns
+			accessSleep = time.Duration(rand.Intn(10) + 1)
+		} else {
+			// Each subsequent time we lose the race, double our sleep
+			accessSleep = accessSleep * 2
+		}
+		time.Sleep(accessSleep)
+	}
 }
 
 func (lc *lightChan) Receive() interface{} {
 	// Sleep time to resolve concurrent channel contention
 	accessSleep := time.Duration(0)
 
-	var received interface{}
-	var access, capacity bool
 	// Keep trying until success
-	for received, access, capacity = lc.TryReceive(); !access || !capacity; received, access, capacity = lc.TryReceive() {
-		// No access because of contention
-		if !access {
-			// First time losing a race
-			if accessSleep == 0 {
-				// Generate a small random sleep 1ns <= S <= 10ns
-				accessSleep = time.Duration(rand.Intn(10) + 1)
-			} else {
-				// Each subsequent time we lose the race, double our sleep
-				accessSleep = accessSleep * 2
-			}
-			// Sleep, then try again
-			time.Sleep(accessSleep)
-		} else {
-			// Reset access sleep since we had no problem with access
-			accessSleep = 0
-			// Wait for more capacity to be available, then try again
-			time.Sleep(capacityPollingInterval)
-		}
-	}
+	for {
+		cur := (*[]interface{})(lc.bodyPtr)
 
-	return received // Success
+		// No items, wait for capacity
+		if len(*cur) == 0 {
+			time.Sleep(capacityPollingInterval)
+			continue
+		}
+
+		// Speculative update
+		newLen := len(*cur) - 1
+		next := make([]interface{}, newLen)
+		for i := 1; i < len(*cur); i++ {
+			next[i-1] = (*cur)[i]
+		}
+		item := (*cur)[0]
+
+		// Try to update
+		if atomic.CompareAndSwapPointer(&lc.bodyPtr, unsafe.Pointer(cur), unsafe.Pointer(&next)) {
+			// Success!
+			return item
+		}
+
+		if accessSleep == 0 {
+			// Generate a small random sleep  s, 1ns <= s <= 10ns
+			accessSleep = time.Duration(rand.Intn(10) + 1)
+		} else {
+			// Each subsequent time we lose the race, double our sleep
+			accessSleep = accessSleep * 2
+		}
+		time.Sleep(accessSleep)
+	}
 }
 
 func (lc *lightChan) Len() int {
-	return int(atomic.LoadUint32(&lc.length))
+	return len(*(*[]interface{})(lc.bodyPtr))
 }
 
 func (lc *lightChan) Cap() int {

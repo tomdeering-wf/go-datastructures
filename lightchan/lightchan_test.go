@@ -69,48 +69,10 @@ func TestLen(t *testing.T) {
 	assert.Equal(t, 0, lc.Len())
 }
 
-// Ensure that TrySend does not block and returns the correct values based on lock status and capacity
-func TestTrySend(t *testing.T) {
-	lc := New(0, 1)
-	access, capacity := lc.TrySend(42)
-	assert.True(t, access)
-	assert.True(t, capacity)
-
-	access, capacity = lc.TrySend(42)
-	assert.True(t, access)
-	assert.False(t, capacity)
-
-	lc.(*lightChan).isLocked = trueUint
-	access, capacity = lc.TrySend(42)
-	assert.False(t, access)
-	assert.False(t, capacity)
-}
-
-// Ensure that TryReceive does not block and returns the correct values based on lock status and capacity
-func TestTryReceive(t *testing.T) {
-	lc := New(0, 1)
-	lc.Send(42)
-	item, access, capacity := lc.TryReceive()
-	assert.Equal(t, 42, item)
-	assert.True(t, access)
-	assert.True(t, capacity)
-
-	item, access, capacity = lc.TryReceive()
-	assert.Equal(t, nil, item)
-	assert.True(t, access)
-	assert.False(t, capacity)
-
-	lc.(*lightChan).isLocked = trueUint
-	item, access, capacity = lc.TryReceive()
-	assert.Equal(t, nil, item)
-	assert.False(t, access)
-	assert.False(t, capacity)
-}
-
 // Ensure that Receive does not block when items are available
 func TestReceiveWithItem(t *testing.T) {
 	lc := New(0, 1)
-	lc.TrySend(5)
+	lc.Send(5)
 	r := lc.Receive()
 	assert.Equal(t, 5, r)
 }

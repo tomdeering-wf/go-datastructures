@@ -89,13 +89,24 @@ var (
 // Unexported implementation of LightChan
 type lightChan struct {
 	// Capacity of the underlying storage
-	capacity uint32
+	capacity int
 
-	// The zeroed value of the type being stored
-	zeroValue interface{}
-
-	// The mutable body of the channel, a pointer to []interface{}
+	// The mutable body of the channel, a *body
 	bodyPtr unsafe.Pointer
+}
+
+type body struct {
+	length    int
+	head      *node
+	headLeft  *node
+	tail      *node
+	tailRight *node
+}
+
+type node struct {
+	item *interface{}
+	next *node
+	prev *node
 }
 
 func (lc *lightChan) Send(item interface{}) {
@@ -104,13 +115,81 @@ func (lc *lightChan) Send(item interface{}) {
 
 	// Keep trying until success
 	for {
-		cur := (*[]interface{})(lc.bodyPtr)
+		cur := (*body)(lc.bodyPtr)
 
 		// No room, wait for capacity
-		if len(*cur) == int(lc.capacity) {
+		if cur.length == lc.capacity {
 			time.Sleep(capacityPollingInterval)
 			continue
 		}
+
+		// Next speculatively-updated body
+		next := &body{
+			head: &node{item: item},
+		}
+
+		// We have 5 possible current list states
+		if cur.head == nil {
+			// List: {}
+			next.tail = next.head
+		} else if cur.head == cur.tail {
+			// List: {H0/T0}
+			next.tail = &node{
+				item: cur.tail.item,
+				next: next.head,
+			}
+			next.head.prev = next.tail
+			next.tailRight = next.head
+			next.headLeft = next.tail
+		} else if cur.headLeft == cur.tail {
+			// List: {T0/H1, T1/H0}
+			next.tail = &node{
+				item: cur.tail.item,
+			}
+
+			next.tailRight = &node{
+				item: cur.head.item,
+				prev: next.tail,
+				next: next.head,
+			}
+			next.tail.next = next.tailRight
+			next.headLeft = next.tailRight
+
+			next.head.prev = next.headLeft
+		} else if cur.headLeft == cur.tailRight {
+			// List: {T0, T1/H1, H0}
+			next.tail = &node{
+				item: cur.tail.item,
+			}
+
+			next.tailRight = &node{
+				item: cur.head.item,
+				prev: next.tail,
+				next: next.head,
+			}
+
+			// TODO
+		} else {
+			// List: {T0, T1, ..., H1, H0}
+			// TODO
+		}
+
+		if cur.head != nil {
+			next.headLeft = &node{
+				item: cur.head.item,
+				next: next.head,
+				prev: cur.head.prev,
+			}
+		}
+
+		var nextHead, nextHeadLeft, nextTail, nextTailRight *node
+
+		addedNode := &node{
+			item: &item,
+			prev: cur.head,
+		}
+
+		cur.head.next = addedNode
 
 		// Speculative update
 		newLen := len(*cur) + 1
@@ -175,7 +254,7 @@ func (lc *lightChan) Receive() interface{} {
 }
 
 func (lc *lightChan) Len() int {
-	return len(*(*[]interface{})(lc.bodyPtr))
+	return int((*body)(lc.bodyPtr).length)
 }
 
 func (lc *lightChan) Cap() int {
